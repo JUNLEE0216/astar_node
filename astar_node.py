@@ -5,6 +5,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from math import atan2, sqrt, sin, pi
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import heapq
 import numpy as np
 import cv2
@@ -16,6 +17,7 @@ class NodeAStar:
         self.g = 0
         self.h = 0
         self.f = 0
+        
 
     def __eq__(self, other): 
         return self.position == other.position
@@ -42,18 +44,21 @@ class IntegratedNavigation(Node):
         self.current_yaw = 0.0
         self.global_path = []
         self.path_index = 0
+        self.cam_count = 0
+        qos_cam = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,history=HistoryPolicy.KEEP_LAST,depth=1)
 
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_path = self.create_publisher(Path, '/planned_path', 10)
         self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
         self.sub_pose = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.pose_callback, 10)
         self.sub_goal = self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)
-        self.sub_cam = self.create_subscription(Image, '/camera/image_raw', self.camera_callback, 10)
+        self.sub_cam = self.create_subscription(Image, '/image_raw', self.camera_callback, qos_cam)
 
         self.timer = self.create_timer(0.1, self.control_loop)
 
         self.bridge = CvBridge()
         self.green_detected = False
+        self.stopped = False
 
         self.get_logger().info("Let's Run!")
 
@@ -140,7 +145,11 @@ class IntegratedNavigation(Node):
         return None
 
     def camera_callback(self, msg):
+        self.cam_count += 1
+        if self.cam_count % 3 != 0:
+            return
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        frame = cv2.resize(frame, (320, 240))
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower_bound = np.array([35, 60, 20])
         upper_bound = np.array([85, 255, 120])
@@ -153,9 +162,13 @@ class IntegratedNavigation(Node):
 
     def control_loop(self):
         if self.green_detected:
-            self.get_logger().info("Green detected! Stopping robot.")
+            if not self.stopped:
+                self.get_logger().warn("Green detected! Stopping robot.")
+                self.stopped = True
             self.stop_robot()
             return
+        if not self.green_detected:
+            self.stopped = False
 
         if not self.global_path:
             return
